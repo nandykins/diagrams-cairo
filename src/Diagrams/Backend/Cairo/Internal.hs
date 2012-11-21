@@ -44,8 +44,15 @@ import Diagrams.TwoD.Size (requiredScaleT)
 import qualified Graphics.Rendering.Cairo as C
 import qualified Graphics.Rendering.Cairo.Matrix as CM
 
-import Control.Monad.State
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Colour.RGBSpace
+import Data.Colour.SRGB
+
+import Data.Word (Word8)
+import Foreign.Marshal.Alloc (free)
+import Foreign.Marshal.Array
+
+import Control.Monad.Reader
+import Data.Maybe (catMaybes, fromMaybe, isJust)
 import Data.List (isSuffixOf)
 
 import Control.Exception (try)
@@ -80,11 +87,8 @@ instance Monoid (Render Cairo R2) where
 
 -- | The custom monad in which intermediate drawing options take
 --   place; 'Graphics.Rendering.Cairo.Render' is cairo's own rendering
---   monad.  At one point @RenderM@ really did use @StateT@, but then
---   the state got taken out... but the @StateT@ remains, now with a
---   zen-like state of type unit, \"just in case\".  Think of it as a
---   good luck charm.
-type RenderM a = StateT () C.Render a  -- no state for now
+--   monad.
+type RenderM a = ReaderT (Maybe (RGBSpace Double)) C.Render a
 
 -- simple, stupid implementations of save and restore for now, since
 -- it suffices to just reset the text alignment to "centered" on
@@ -108,24 +112,22 @@ instance Backend Cairo R2 where
           , cairoSizeSpec   :: SizeSpec2D -- ^ The requested size of the output
           , cairoOutputType :: OutputType -- ^ the output format and associated options
           , cairoBypassAdjust  :: Bool    -- ^ Should the 'adjustDia' step be bypassed during rendering?
+          , cairoColorSpace :: Maybe (RGBSpace Double) -- ^ Color space used during rendering
           }
 
   withStyle _ s t (C r) = C $ do
     save
     cairoMiscStyle s
     r
-    lift $ do
-      cairoTransf t
-      cairoStrokeStyle s
-      C.stroke
+    lift $ cairoTransf t
+    cairoStrokeStyle s
+    lift $ C.stroke
     restore
 
-  doRender _ (CairoOptions file size out _) (C r) = (renderIO, r')
-    where r' = evalStateT r ()
+  doRender _ (CairoOptions file size out _ space) (C r) = (renderIO, r')
+    where r' = runReaderT r space
           renderIO = do
-            let surfaceF s = C.renderWith s r'
-
-                -- Everything except Dims is arbitrary. The backend
+            let -- Everything except Dims is arbitrary. The backend
                 -- should have first run 'adjustDia' to update the
                 -- final size of the diagram with explicit dimensions,
                 -- so normally we would only expect to get Dims anyway.
@@ -135,9 +137,42 @@ instance Backend Cairo R2 where
                           Dims w' h' -> (w',h')
                           Absolute   -> (100,100)
 
+                (iw,ih) = (round w, round h)
+                fmt     = C.FormatARGB32
+                stride  = C.formatStrideForWidth fmt iw
+                len     = ih * stride
+
+                -- Ideally we'd want to handle spaces separately per file type,
+                -- tagging the color space in that particular file type's way.
+                -- Due to limitations of cairo's file-writing API however we
+                -- just compand all of the file types before writing.
+                surfaceF s = case space of
+                  Nothing -> C.renderWith s r'
+
+                  Just sp -> do
+                    buf <- mallocArray len
+                    pokeArray buf (replicate len 0)
+                    C.withImageSurfaceForData buf fmt iw ih stride $ \s' -> do
+                      C.renderWith s' r'
+                      peekArray len buf >>= pokeArray buf . fixColors sp
+                      C.renderWith s $ do
+                        C.setSourceSurface s' 0 0
+                        C.paint
+                    free buf
+
+                fixColors _ [] = []
+                fixColors s (b:g:r:a:cs) = b':g':r':a : fixColors s cs
+                  where c   = rgbUsingSpace s (f r) (f g) (f b)
+                        f w = fromIntegral w / fromIntegral a
+                        i d = round (d * fromIntegral a)
+                        rgb = toSRGB c
+                        r'  = i (channelRed rgb)
+                        g'  = i (channelGreen rgb)
+                        b'  = i (channelBlue rgb)
+
             case out of
               PNG ->
-                C.withImageSurface C.FormatARGB32 (round w) (round h) $ \surface -> do
+                C.withImageSurface fmt iw ih $ \surface -> do
                   surfaceF surface
                   C.surfaceWriteToPNG surface file
               PS  -> C.withPSSurface  file w h surfaceF
@@ -176,7 +211,7 @@ cairoMiscStyle s =
         fWeight  = fromFontWeight . fromMaybe FontWeightNormal
                  $ getFontWeight <$> getAttr s
         handleFontFace = Just . lift $ C.selectFontFace fFace fSlant fWeight
-        fColor c = lift $ setSource (getFillColor c) s
+        fColor c = setSource (getFillColor c) s
         lFillRule = lift . C.setFillRule . fromFillRule . getFillRule
 
 fromFontSlant :: FontSlant -> C.FontSlant
@@ -189,7 +224,7 @@ fromFontWeight FontWeightNormal = C.FontWeightNormal
 fromFontWeight FontWeightBold   = C.FontWeightBold
 
 -- | Handle style attributes having to do with stroke.
-cairoStrokeStyle :: Style v -> C.Render ()
+cairoStrokeStyle :: Style v -> RenderM ()
 cairoStrokeStyle s =
   sequence_
   . catMaybes $ [ handle fColor
@@ -199,23 +234,25 @@ cairoStrokeStyle s =
                 , handle lJoin
                 , handle lDashing
                 ]
-  where handle :: (AttributeClass a) => (a -> C.Render ()) -> Maybe (C.Render ())
+  where handle :: AttributeClass a => (a -> RenderM ()) -> Maybe (RenderM ())
         handle f = f `fmap` getAttr s
-        fColor c = setSource (getFillColor c) s >> C.fillPreserve
+        fColor c = setSource (getFillColor c) s >> lift C.fillPreserve
         lColor c = setSource (getLineColor c) s
-        lWidth   = C.setLineWidth . getLineWidth
-        lCap     = C.setLineCap . fromLineCap . getLineCap
-        lJoin    = C.setLineJoin . fromLineJoin . getLineJoin
+        lWidth   = lift . C.setLineWidth . getLineWidth
+        lCap     = lift . C.setLineCap . fromLineCap . getLineCap
+        lJoin    = lift . C.setLineJoin . fromLineJoin . getLineJoin
         lDashing (getDashing -> Dashing ds offs) =
-          C.setDash ds offs
+          lift $ C.setDash ds offs
 
-setSource :: Color c => c -> Style v -> C.Render ()
-setSource c s = C.setSourceRGBA r g b a'
-  where (r,g,b,a) = colorToSRGBA c
-        a'        = case getOpacity <$> getAttr s of
-                      Nothing -> a
-                      Just d  -> a * d
+setSource :: Color c => c -> Style v -> RenderM ()
+setSource c s = do
+  space <- ask
+  let (r,g,b,a) = toRGBAUsingSpace (fromMaybe sRGBSpace space) c
+      a'        = case getOpacity <$> getAttr s of
+                    Nothing -> a
+                    Just d  -> a * d
 
+  lift $ C.setSourceRGBA r g b a'
 
 -- | Multiply the current transformation matrix by the given 2D
 --   transformation.

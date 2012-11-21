@@ -4,6 +4,7 @@ import Control.Applicative ((<$>))
 import Control.Exception (bracket)
 
 import Data.Colour
+import Data.Colour.RGBSpace (RGBSpace)
 import Data.Colour.SRGB (sRGB)
 import Data.Word (Word8)
 
@@ -16,10 +17,10 @@ import Foreign.Marshal.Array (peekArray)
 
 -- | Render to a regular list of Colour values.
 
-renderToList :: (Ord a, Floating a) =>
-                  Int -> Int -> Diagram Cairo R2 -> IO [[AlphaColour a]]
-renderToList w h d =
-  f 0 <$> bracket (renderPtr w h d) free (peekArray $ w*h*4)
+renderToList :: (Ord a, Floating a) => Int -> Int -> Maybe (RGBSpace Double)
+                                    -> Diagram Cairo R2 -> IO [[AlphaColour a]]
+renderToList w h s d =
+  f 0 <$> bracket (renderPtr w h s d) free (peekArray $ w*h*4)
  where
   f :: (Ord a, Floating a) => Int -> [Word8] -> [[AlphaColour a]]
   f _ [] = []

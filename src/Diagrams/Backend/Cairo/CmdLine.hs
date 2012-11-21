@@ -57,6 +57,9 @@ import Data.Maybe          (fromMaybe)
 import Control.Monad       (when, forM_, mplus)
 import Data.List.Split
 
+import Data.Colour.RGBSpace
+import Data.Colour.SRGB.Linear (sRGBGamut)
+
 import Text.Printf
 
 import System.Environment  (getArgs, getProgName)
@@ -91,6 +94,7 @@ data DiagramOpts = DiagramOpts
                    , list      :: Bool
                    , selection :: Maybe String
                    , fpu       :: Double
+                   , linear    :: Bool
 #ifdef CMDLINELOOP
                    , loop      :: Bool
                    , src       :: Maybe String
@@ -123,9 +127,14 @@ diagramOpts prog sel = DiagramOpts
   , fpu = 30
           &= typ "FLOAT"
           &= help "Frames per unit time (for animations)"
+
+  , linear = False
+           &= help "Render in linear light internally"
+
 #ifdef CMDLINELOOP
   , loop = False
             &= help "Run in a self-recompiling loop"
+            &= name "l"
   , src  = def
             &= typFile
             &= help "Source file to watch"
@@ -166,6 +175,7 @@ diagramOpts prog sel = DiagramOpts
 --   -h --height=INT        Desired height of the output image
 --   -o --output=FILE       Output file
 --   -f --fpu=FLOAT         Frames per unit time (for animations)
+--      --linear            Render in linear light internally
 --   -l --loop              Run in a self-recompiling loop
 --   -s --src=FILE          Source file to watch
 --   -i --interval=SECONDS  When running in a loop, check for changes every n
@@ -217,9 +227,11 @@ chooseRender opts d =
                      )
                      outTy
                      False
+                     (if linear opts then Just sRGBLinear else Nothing)
                    )
                    d
        | otherwise -> putStrLn $ "Unknown file type: " ++ last ps
+  where sRGBLinear = mkRGBSpace sRGBGamut linearTransferFunction
 
 -- | @multiMain@ is like 'defaultMain', except instead of a single
 --   diagram it takes a list of diagrams paired with names as input.

@@ -56,7 +56,9 @@ module Diagrams.Backend.Cairo.Text
 import Diagrams.Backend.Cairo.Internal
 import Diagrams.Prelude
 
-import Control.Monad.State
+import Data.Colour.RGBSpace (RGBSpace)
+
+import Control.Monad.Reader
 import System.IO.Unsafe
 
 import qualified Graphics.Rendering.Cairo as C
@@ -74,10 +76,10 @@ unsafeCairo = unsafePerformIO . queryCairo
 --   This does not do all styling - just attributes that are processed by
 --   \"cairoMiscStyle\", which does clip, fill color, fill rule, and,
 --   importantly for this module, font face, style, and weight.
-cairoWithStyle :: C.Render a -> Style R2 -> C.Render a
-cairoWithStyle f style = do
+cairoWithStyle :: C.Render a -> Style R2 -> Maybe (RGBSpace Double) -> C.Render a
+cairoWithStyle f style space = do
   C.save
-  evalStateT (cairoMiscStyle style) ()
+  runReaderT (cairoMiscStyle style) space
   result <- f
   C.restore
   return result
@@ -93,7 +95,7 @@ processTextExtents (C.TextExtents  xb yb  w h  xa ya)
 -- | Get the extents of a string of text, given a style to render it with.
 getTextExtents :: Style R2 -> String -> C.Render TextExtents
 getTextExtents style txt
-  = cairoWithStyle (processTextExtents <$> C.textExtents txt) style
+  = cairoWithStyle (processTextExtents <$> C.textExtents txt) style Nothing
 
 -- | A more convenient data structure for the results of a font-extents query.
 data FontExtents = FontExtents
@@ -108,7 +110,7 @@ processFontExtents (C.FontExtents a d h  mx my)
 -- | Gets the intrinsic extents of a font.
 getFontExtents :: Style R2 -> C.Render FontExtents
 getFontExtents style
-  = cairoWithStyle (processFontExtents <$> C.fontExtents) style
+  = cairoWithStyle (processFontExtents <$> C.fontExtents) style Nothing
 
 -- | Gets both the "FontExtents" and "TextExtents" of the string with the a
 --   particular style applied.  This is more efficient than calling both
@@ -118,7 +120,7 @@ getExtents style str = cairoWithStyle (do
     fe <- processFontExtents <$> C.fontExtents
     te <- processTextExtents <$> C.textExtents str
     return (fe, te)
-  ) style
+  ) style Nothing
 
 -- | Queries the amount of horizontal offset that needs to be applied in order to
 --   position the second character properly, in the event that it is @hcat@-ed
